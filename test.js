@@ -90,6 +90,8 @@ const React = {
     if (!pendingSetStateComponents.has(component)) {
       pack = {updaters: [], callbacks: []}
       pendingSetStateComponents.set(component, pack)
+    } else {
+      pack = pendingSetStateComponents.get(component)
     }
     const {updaters, callbacks} = pack
     updaters.push(updater)
@@ -139,10 +141,10 @@ const ReactReconciler = {
     componentToNode: new Map()
   },
   Node(element) {
-    if (typeof element === 'string') {
+    if (typeof element === 'string' || typeof element === 'number') {
       return {
         type: null,
-        text: element,
+        text: `${element}`,
         domNode: null,
 
         nextSibling: null,
@@ -165,7 +167,7 @@ const ReactReconciler = {
         parent: null
       }
     }
-    const {id = null, className = null, style = null, ...candidates} = props
+    const {id = null, className = null, style = null, value = null, ...candidates} = props
     const reg = /^on([A-Z][a-zA-Z]+)$/
     const handlers = Object.keys(candidates)
       .map(key => {
@@ -182,6 +184,7 @@ const ReactReconciler = {
       id,
       className,
       style,
+      value,
       handlers,
 
       domNode: null,
@@ -202,31 +205,42 @@ const ReactReconciler = {
       } else {
         ReactReconciler.engine.componentToNode.delete(oldNode._maker)
       }
-      return
+      return true
     }
     if (!oldNode) {
       diffCollector.add.push(newNode)
-      return
+      return true
     }
-    if (newNode.type !== oldNode.type || newNode.type === null && newNode.text !== oldNode.text) {
+    if (newNode.type !== oldNode.type) {
       diffCollector.remove.push(oldNode)
       diffCollector.add.push(newNode)
-      return
+      return true
     }
-    const attrs = ['id', 'className', 'style'].filter(key => newNode[key] !== oldNode[key]).reduce((a, b) => {
+    newNode.domNode = oldNode.domNode
+    if (newNode.type === null) {
+      if (newNode.text !== oldNode.text) {
+        diffCollector.remove.push(oldNode)
+        diffCollector.add.push(newNode)
+      }
+      return false
+    }
+    const attrs = ['id', 'className', 'style', 'value'].filter(key => key === 'value' || newNode[key] !== oldNode[key]).reduce((a, b) => {
       a[b] = newNode[b]
       return a
-    },{})
-    newNode.domNode = oldNode.domNode
-    diffCollector.setAttributes.push([newNode, attrs])
+    }, {})
+    if (Object.keys(attrs).length) {
+      diffCollector.setAttributes.push([newNode, attrs])
+      return false
+    }
+    return false
   },
-  _traverse(element, oldNode, handler, preSibling, parent) {
-    const {engine: {componentToNode}, Node, _traverse} = ReactReconciler
-    element = element || ''
+  _traverse(element, oldNode, preSibling, parent) {
+    const {engine: {componentToNode}, Node, _traverse, _diff} = ReactReconciler
+    element = element === null || element === false ? '' : element
     const newNode = Node(element)
     newNode.preSibling = preSibling
     newNode.parent = parent
-    handler(newNode, oldNode)
+    const isDiff = _diff(newNode, oldNode)
     const {type} = element
     if (typeof type === 'function') {
       if (parent.domNode) {
@@ -240,9 +254,10 @@ const ReactReconciler = {
         component.props = element.props
         newNode.component = component
         componentToNode.set(component, newNode)
-        newNode.firstChild = _traverse(React.render(component), oldNode && oldNode.firstChild, handler, null, newNode)
+        newNode.firstChild = _traverse(React.render(component), isDiff ? null : oldNode && oldNode.firstChild, null, newNode)
       } else {
-        newNode.firstChild = _traverse(type(element.props), oldNode && oldNode.firstChild, handler, null, newNode)
+        console.log('--------------------------')
+        newNode.firstChild = _traverse(type(element.props), isDiff ? null : oldNode && oldNode.firstChild, null, newNode)
       }
       return newNode
     }
@@ -252,17 +267,17 @@ const ReactReconciler = {
       let pointer = oldNode && oldNode.firstChild
       let memoSibling = null
       if (children.length) {
-        memoSibling = newNode.firstChild = _traverse(children[0], pointer, handler, null, newNode)
+        memoSibling = newNode.firstChild = _traverse(children[0], isDiff ? null : pointer, null, newNode)
         pointer = pointer && pointer.nextSibling
       }
       for (let i = 1; i < children.length; i++) {
-        const tp = _traverse(children[i], pointer, handler, memoSibling, newNode)
+        const tp = _traverse(children[i], pointer, memoSibling, newNode)
         pointer = pointer && pointer.nextSibling
         memoSibling.nextSibling = tp
         memoSibling = tp
       }
       while (pointer) {
-        handler(null, pointer)
+        _diff(null, pointer)
         pointer = pointer.nextSibling
       }
     }
@@ -270,8 +285,10 @@ const ReactReconciler = {
   },
   render(element, domNode) {
     const {engine: {componentToNode}, _diff} = ReactReconciler
-    const node = element._maker && componentToNode.get(element._maker).firstChild || null
-    const newNode = ReactReconciler._traverse(element, node, _diff, node && node.preSibling, domNode ? {domNode} : node && node.parent)
+    const rootNode = element._maker && componentToNode.get(element._maker) || {type: null, domNode, firstChild: null}
+    const node = rootNode && rootNode.firstChild || null
+    const newNode = ReactReconciler._traverse(element, node, node && node.preSibling, rootNode)
+    rootNode.firstChild = newNode
     if (node) {
       newNode.parent = node.parent
       if (node.preSibling) {
@@ -303,8 +320,12 @@ const ReactDOM = {
     const {diffCollector, DOMtoNode} = ReactDOM.engine
     console.log(Object.assign({}, diffCollector))
 
-    diffCollector.remove.map(node => node.domNode).forEach(domNode => {
-      domNode.remove()
+    diffCollector.remove.forEach(node => {
+      if (typeof node.type === 'function') {
+        node.childDomNode.remove()
+      } else {
+        node.domNode.remove()
+      }
     })
     
     diffCollector.add.forEach(node => {
@@ -314,6 +335,7 @@ const ReactDOM = {
       }
       const domNode = node.type !== null ? document.createElement(node.type) : document.createTextNode(node.text)
       node.domNode = domNode
+      DOMtoNode.set(domNode, node)
       
       let pointer = node.parent
       let pre = null
@@ -324,10 +346,11 @@ const ReactDOM = {
       }
 
       if (pre) {
-        node.parent.domNode.insertBefore(domNode, pre.domNode.sibling)
+        console.log('+++++++++++++++', node, pre)
+        node.parent.domNode.insertBefore(domNode, pre.domNode.nextSibling)
       } else if (node.preSibling) {
         const reference = typeof node.preSibling.type === 'function' ? node.preSibling.childDomNode : node.preSibling.domNode
-        node.parent.domNode.insertBefore(domNode, reference.sibling)
+        node.parent.domNode.insertBefore(domNode, reference.nextSibling)
       } else {
         node.parent.domNode.insertBefore(domNode, node.parent.domNode.firstChild)
       }
@@ -349,7 +372,7 @@ const ReactDOM = {
     diffCollector.setAttributes.forEach(([node, attrs]) => {
       const {style, ...rest} = attrs
       Object.keys(rest).forEach(key => {
-        node.domNode.setAttribute(key === 'className' ? 'class' : key, rest[key] || '')
+        node.domNode[key === 'className' ? 'class' : key] = rest[key] || ''
       })
       if (style) {
         const styleStr = Object.keys(style).reduce((a, b) => {
@@ -364,15 +387,57 @@ const ReactDOM = {
     diffCollector.add = []
     diffCollector.setAttributes = []
   },
+  // only support bubble
+  // no stop propagation
+  // only listen click, change, and input
+  eventProxy(node, eventType, event) {
+    const path = []
+    while (node) {
+      if (typeof node.type === 'string' && node.handlers[eventType]) {
+        path.push(node.handlers[eventType])
+      }
+      node = node.parent
+    }
+    console.log(path)
+    path.forEach(handler => {
+      handler(event)
+    })
+  },
+  signupEventProxy() {
+    ['click', 'change', 'input'].forEach(eventType => {
+      const {DOMtoNode} = ReactDOM.engine
+      document.addEventListener(eventType, event => {
+        console.log('getting')
+        const node = DOMtoNode.get(event.target)
+        if (node) {
+          ReactDOM.eventProxy(node, eventType, event)
+        }
+      })
+    })
+  },
   render(element, container, callback) {
     const node = ReactReconciler.render(element, container)
     container.innerHTML = ''
+    ReactDOM.signupEventProxy()
     container.append(node.firstChild.domNode)
     if (callback) {
       callback()
     }
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -414,42 +479,67 @@ function Nav(props) {
 class Main extends React.Component {
   render() {
     return (
-    	<div>
-      	yes
+      <div>
+        yes
         <p>meow!!!</p>
       </div>
     )
   }
 }
-var T = ({color}) => <Nav name="rabbit" ref={a => a} onChange={() => {}}>
+var T = ({color}) => <Nav name="rabbit" ref={a => a}>
   <div className="q.q" onClick={() => {}}>Q.Q</div>
   <span style={{width: '100px', color, margin: '100px'}}>cool</span>
       <Main />
 </Nav>
 
-var b = <Main>
-  <Nav updater="hi"/>
-  <footer></footer>
-</Main>
+var b = <Main></Main>
 
 var t = <T color="green" />
+    
+var Oops = ({color}) => (
+  <div>
+    <h1 style={{color}}>this is Oops</h1>
+    <p>oooooooooooooooooooooooooooooops</p>
+  </div>
+)
+
+var a = <Oops color="red" />
   
 class App extends React.Component {
   constructor() {
-  	super()
-    this.state = {name: 'oooops', color: 'red'}
+    super()
+    this.state = {name: 'oooops', color: 'red', el: b, value: '', inc: 0, randColor: '#' + Math.floor((Math.random() * 0x1000000)).toString(16).padStart(6)}
     setTimeout(() => {
-    	this.setState({name: 'rabbit', color: 'pink'})
+      this.setState({name: 'rabbit', color: 'pink', el: a})
     }, 3000)
   }
-	render() {
-      const {name, color} = this.state
+  handleClick = () => {
+    this.setState(({inc}) => ({inc: inc + 1}))
+  }
+  randColorClick = () => {
+    this.setState({randColor: '#' + Math.floor((Math.random() * 0x1000000)).toString(16).padStart(6)})
+  }
+  render() {
+      const {name, color, el, value, inc, randColor} = this.state
       return (
-      	<div>
+        <div>
           {name}
           <T color={color} />
-          {t}
+          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          {el}
+          -----------------------------
+          <p />
+          {name === 'rabbit' && <Oops color={color} />}
           {['hi', 'yes', <p>ending</p>]}
+          <div>
+            <h1>value(cannot input blank ' '): '{value}'</h1>
+            <input value={value} onInput={e => {this.setState({value: e.target.value.split(' ').join('')})}} />
+          </div>
+          <div onClick={this.randColorClick} style={{'background-color': randColor}}>
+            <p>click generate random color</p>
+            <h1>inc: {inc}</h1>
+            <button onClick={this.handleClick}>inc btn:{inc}</button>
+          </div>
         </div>
       )
     }
@@ -463,8 +553,8 @@ class App extends React.Component {
           // {temp1}
 
 ReactDOM.render(
-	<App />,
-  	document.body
+  <App />,
+    document.body
 )
 
 
