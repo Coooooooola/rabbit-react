@@ -679,7 +679,7 @@ var App = function (_React$Component2) {
     };
 
     _this2.randColorClick = function () {
-      _this2.setState({ randColor: '#' + Math.floor(Math.random() * 0x1000000).toString(16).padStart(6) });
+      _this2.setState({ randColor: '#' + Math.floor(Math.random() * 0x1000000).toString(16).padStart(6, '0') });
     };
 
     _this2.state = { name: 'oooops', color: 'red', el: b, value: '', inc: 0, randColor: '#' + Math.floor(Math.random() * 0x1000000).toString(16).padStart(6) };
