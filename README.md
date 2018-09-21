@@ -8,3 +8,5 @@
 
 性能是非常ok的！如果你需要看performance你要在console写上console.log = () => {}
 因为。。。。我没把console在测试代码中删掉，所以会造成性能问题
+
+如果你想知道这个react框架是如何运行的，我可以让你在很短的时间内get到我的idea
